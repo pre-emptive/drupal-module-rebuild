@@ -1,0 +1,7 @@
+; $Id: rebuild.info,v 1.1 2007/07/18 14:11:10 ralph Exp $
+name = Rebuild
+description = Rebuild or clear various Drupal internal data structures
+;dependencies[] = 
+version = "1.0"
+;project = "development"
+core = 6.x

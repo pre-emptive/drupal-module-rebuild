@@ -1,0 +1,269 @@
+<?php
+
+// $Id: rebuild.module,v 1.3 2009/04/07 21:34:37 ralph Exp $
+
+// (C)2007, Ralph Bolton, Pre-Emptive Limited
+// GNU Public License V2 licensed.
+// No warranty is expressed or implied. Use of this software is
+// entirely at the user's risk. Pre-Emptive or it's employees accept
+// no liability for any damage or loss caused by use of this software. 
+// For more information, please see http://www.pre-emptive.net/gpl2
+
+// We keep these in defines so that it's easy to check for them later on.
+define('REBUILD_MENU_MSG', 'Rebuild menu data structures');
+define('REBUILD_THEME_MSG', 'Rebuild theme data structures');
+define('REBUILD_CACHE_CLEAR_MSG', 'Clear Entries in');
+define('REBUILD_CACHE_CLEAR_ALL_MSG', 'Clear all entries in all caches');
+define('REBUILD_CLEAR_SESSION_MSG', 'Clear own PHP session information');
+define('REBUILD_SELECT_ALL_CID', '--all--');
+
+/**
+ * Implementation of hook_help().
+ */
+function rebuild_help($section) {
+  switch ($section) {
+    case 'admin/settings/rebuild':
+      return '<p>' . t('Rebuild or clear cached data structures within Drupal.') . '</p><p><strong> ' . t('The functions within this module should be used with extreme caution.') . '</strong></p>';
+  }
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function rebuild_menu() {
+  $items = array();
+
+  $items['admin/settings/rebuild'] = array(
+    'title' => 'Rebuild',
+    'description' => 'Rebuild or clear various Drupal data structures.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('rebuild_admin_settings'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_perm().
+ */
+function rebuild_perm() {
+  return array ();
+}
+
+/**
+ * Implementation of hook_theme().
+ */
+function rebuild_theme() {
+  return array();
+}
+
+// Helper function that returns the types of cache table we can work with.
+function _rebuild_get_caches() {
+  global $db_type;
+  global $db_prefix;
+
+  $caches = array(
+    'Main Cache' => 'cache',
+    'Filter Cache' => 'cache_filter',
+    'Form Cache' => 'cache_form',
+    'Menu Cache' => 'cache_menu',
+    'Page Cache' => 'cache_page',
+  );
+
+  // Attempt to get the list of tables from the database.
+  // This is (so far) only really tested on MySQL. 
+  // We fetch the list of tables, and without knowing the column
+  // name that the DB gives us (because MySQL uses a column name based on
+  // the database name), we extract all suitable table names. We then
+  // merge them into the $caches array if we don't know about them already.
+
+  switch($db_type) {
+    case 'mysql':
+    case 'mysqli':
+      $result = db_query('SHOW TABLES');
+      break;
+    case 'pgsql':
+      $result = db_query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'");
+      break;
+      // Oracle is something like "SELECT * from tab"
+    default:
+      return $caches;
+      break;
+  }
+
+  if(!db_error()) {
+    $cache_values = array_values($caches);
+    $name_prefix = $db_prefix . 'cache';
+    while($row = db_fetch_array($result)) {
+      // Use the first field in the array to pull out the table name 
+      $keys = array_keys($row);
+      $key = array_shift($keys);
+      if(isset($key)) {
+        $content = $row[$key];
+        if(substr($content,0,strlen($name_prefix)) == $name_prefix) {
+          // A suitable table name. See if we need to add it...?
+          if(!in_array($content, $cache_values)) {
+            // Don't already have it, so add it. Strip off the
+            // xxx_cache_ part of the table name
+            $nicename = substr($content,strlen($name_prefix));
+            $nicename = preg_replace('/^_/','',$nicename);
+            // Capitalise the first character. This isn't very locale-friendly
+            // because it's only really English speaking people that do this(!)
+            $nicename[0] = strtoupper($nicename[0]);
+            // Append the word "Cache" to the name
+            $nicename = $nicename . ' Cache';
+            // And insert in the array. Remember the value for next time too.
+            $caches[$nicename] = $content;
+            $cache_values[] = $content;
+          }
+        } // end if cache*
+      }
+    } // end while
+  }
+
+  return $caches;
+}
+
+/**
+ * Administrative settings. This function returns the form that does all of
+ * the clever stuff for the administrator.
+ */
+function rebuild_admin_settings() {
+  $form = array();
+
+  $form['menu_system'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Menu System',
+    '#description' => 'Rebuild {menu_router} and {menu_links} data structures that drive the Drupal Menu system',
+  );
+  $form['menu_system']['menu_rebuild'] = array(
+    '#type' => 'submit',
+    '#value' => t(REBUILD_MENU_MSG),
+  );
+  $form['theme_system'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Theme System',
+    '#description' => 'Rebuild theme data structures that drive the Drupal theme system',
+  );
+  $form['theme_system']['theme_rebuild'] = array(
+    '#type' => 'submit',
+    '#value' => t(REBUILD_THEME_MSG),
+  );
+
+  $form['drupal_cache'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Clear Cache',
+    '#description' => 'Clear cached data structures used by various modules',
+  );
+  $caches = _rebuild_get_caches();
+
+  foreach($caches as $name => $table) {
+    $result = db_query('SELECT DISTINCT cid FROM {' . $table . '}');
+    if(db_error()) {
+      continue;
+    }
+    $options = array(REBUILD_SELECT_ALL_CID => t('All Entries'));
+    while($row = db_fetch_object($result)) {
+      $options[$row->cid] = t($row->cid);
+    }
+    $form['drupal_cache'][$table] = array(
+      '#type' => 'fieldset',
+      '#title' => t($name),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    if(count($options) > 1) {
+      $form['drupal_cache'][$table][$table . '_selector'] = array(
+        '#type' => 'select',
+        '#title' => 'CID',
+        '#options' => $options,
+      );
+      $form['drupal_cache'][$table][$table . '_cache_clear'] = array(
+        '#type' => 'submit',
+        '#value' => t(REBUILD_CACHE_CLEAR_MSG . ' @name', array('@name' => $name)),
+      );
+    } else {
+      $form['drupal_cache'][$table][$table . '_no_selector'] = array(
+        '#type' => 'markup',
+        '#value' => '<div>' . t('The %table table is empty', array('%table' => $table)) . '</div>',
+      );
+    }
+  }
+
+  $form['drupal_cache']['all_caches'] = array(
+    '#type' => 'submit',
+    '#value' => t(REBUILD_CACHE_CLEAR_ALL_MSG),
+  );
+  
+
+  $form['php_session'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Own PHP Session',
+    '#description' => 'Clear own PHP session information (maintains the session, but removes information within it)',
+  );
+  $form['php_session']['clear_session'] = array(
+    '#type' => 'submit',
+    '#value' => t(REBUILD_CLEAR_SESSION_MSG),
+  );
+
+  return $form;
+
+}
+
+function rebuild_admin_settings_submit($form, &$form_state) {
+
+  $caches = _rebuild_get_caches();
+
+  if($form_state['values']['op'] == REBUILD_MENU_MSG) {
+    menu_rebuild();
+    drupal_set_message(t('Menu configuration tables have been rebuilt.'));
+  } elseif($form_state['values']['op'] == REBUILD_THEME_MSG) {
+    drupal_rebuild_theme_registry();
+    drupal_set_message(t('Theme registry data structures have been rebuilt.'));
+  } elseif($form_state['values']['op'] == REBUILD_CLEAR_SESSION_MSG) {
+    // To clear session information, we simply look in $_SESSION and unset everything
+    // inside it. Note: don't unset $_SESSION itself!
+    foreach(array_keys($_SESSION) as $key) {
+      unset($_SESSION[$key]);
+    }
+    drupal_set_message(t('PHP session information has been cleared.'));
+
+  } elseif($form_state['values']['op'] == REBUILD_CACHE_CLEAR_ALL_MSG) {
+    // Clear all caches
+    cache_clear_all();
+    drupal_set_message(t('All cache entries have been cleared.'));
+  } elseif(substr($form_state['values']['op'], 0, strlen(REBUILD_CACHE_CLEAR_MSG)) == REBUILD_CACHE_CLEAR_MSG) {
+    $name = substr($form_state['values']['op'], strlen(REBUILD_CACHE_CLEAR_MSG) + 1);
+    if(isset($caches[$name])) {
+      $table = $caches[$name];
+
+      $cid = NULL;
+      $wildcard = FALSE;
+      if(isset($form_state['values'][$table . '_selector'])) {
+        $cid = $form_state['values'][$table . '_selector'];
+
+        if($cid == REBUILD_SELECT_ALL_CID) {
+          $cid = '*';
+          $wildcard = TRUE;
+        }
+      }
+   
+      cache_clear_all($cid, $table, $wildcard);
+      drupal_set_message(t('The entries in %name have been cleared.', array('%name' => $name))); 
+      
+    } else {
+      // Didn't get a table name - we can't proceed
+      drupal_set_message(t('Didn\'t get a database table for %name - cannot work with it.', array('%name' => $name)), 'error');
+    }
+  } else {
+    // We shouldn't ever get here
+    // It's okay to put the op value into the string, because t() cleans it
+    // when used with %op:
+    drupal_set_message(t('Unknown operation %op - have done nothing.', array('%op' => $form_state['values']['op'])), 'error');
+  }
+}
+
+// The following line is for Vim users - please don't delete it.
+// vim: set filetype=php expandtab tabstop=2 shiftwidth=2:
